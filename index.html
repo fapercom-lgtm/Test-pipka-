@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#050508">
+  <title>Pip AI (Groq Turbo)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-tap-highlight-color: transparent; }
+    body, html {
+      width: 100vw; height: 100vh;
+      background-color: #050508;
+      overflow: hidden;
+      font-family: 'Segoe UI', Roboto, sans-serif;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+    }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    
+    #ui-bar {
+      position: absolute; top: 12px; left: 16px; right: 16px;
+      display: flex; justify-content: space-between; align-items: center;
+      pointer-events: none; z-index: 10;
+    }
+    .status-badge {
+      background: rgba(255, 255, 255, 0.08);
+      color: #00f0ff; padding: 6px 14px;
+      border-radius: 20px; font-size: 13px;
+      border: 1px solid rgba(0, 240, 255, 0.25);
+      backdrop-filter: blur(6px);
+    }
+    .btn {
+      pointer-events: auto;
+      background: rgba(255, 255, 255, 0.08);
+      color: #aaa; border: 1px solid rgba(255,255,255,0.15);
+      padding: 6px 12px; border-radius: 20px;
+      font-size: 12px; cursor: pointer;
+    }
+    #subtitles {
+      position: absolute; bottom: 18px;
+      width: 88%; text-align: center;
+      color: #e0faff; font-size: 17px;
+      text-shadow: 0 2px 8px rgba(0,0,0,0.95);
+      pointer-events: none; z-index: 10;
+      min-height: 24px;
+    }
+    /* Экран первого касания */
+    #boot-overlay {
+      position: absolute; inset: 0;
+      background: rgba(5, 5, 8, 0.94);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 30; color: #00f0ff; cursor: pointer;
+      text-align: center; padding: 20px;
+    }
+    .pulse-btn {
+      background: #00f0ff; color: #050508;
+      font-weight: bold; font-size: 18px;
+      padding: 16px 36px; border-radius: 40px;
+      box-shadow: 0 0 25px rgba(0, 240, 255, 0.6);
+      margin-bottom: 14px;
+    }
+    /* Настройки Groq и умного дома */
+    #settings-modal {
+      position: absolute; inset: 0;
+      background: rgba(5, 5, 10, 0.95);
+      display: none; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 40; color: #fff; padding: 20px;
+    }
+    .modal-box {
+      background: #12131c; border: 1px solid #2a2d3d;
+      padding: 18px; border-radius: 16px;
+      width: 90%; max-width: 440px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .modal-box input {
+      width: 100%; padding: 10px; border-radius: 8px;
+      border: 1px solid #333; background: #090a0f; color: #fff;
+    }
+    .modal-box button {
+      background: #00f0ff; color: #000; font-weight: bold;
+      border: none; padding: 10px; border-radius: 8px; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Экран запуска в 1 касание -->
+  <div id="boot-overlay" onclick="bootPip()">
+    <div class="pulse-btn">⚡ РАЗБУДИТЬ ПИПА</div>
+    <div style="color:#8899a6; font-size:13px;">Нажмите в любое место экрана для запуска (Groq Turbo)</div>
+  </div>
+
+  <div id="ui-bar">
+    <div id="status" class="status-badge">Сплю...</div>
+    <button class="btn" onclick="openSettings()">⚙️ Настройки</button>
+  </div>
+
+  <canvas id="eyesCanvas"></canvas>
+  <div id="subtitles"></div>
+
+  <!-- Настройки Groq API и вебхука -->
+  <div id="settings-modal">
+    <div class="modal-box">
+      <div style="color:#00f0ff; font-weight:bold;">Настройки Groq API (Сверхбыстрый режим)</div>
+      <label style="font-size:12px; color:#aaa;">Groq API Key (gsk_... с console.groq.com):</label>
+      <input type="password" id="apiKeyInput" placeholder="gsk_..." />
+      <label style="font-size:12px; color:#aaa;">URL Вебхука Умного дома (Home Assistant / ESP / MacroDroid):</label>
+      <input type="text" id="webhookInput" placeholder="http://192.168.1.100:8123/api/webhook/pip" />
+      <button onclick="saveSettings()">Сохранить и запустить</button>
+    </div>
+  </div>
+
+<script>
+// ================= НАСТРОЙКИ GROQ API =================
+const MODEL_NAME = "llama-3.1-8b-instant";
+
+let GROQ_API_KEY = localStorage.getItem('pip_groq_key') || '';
+let SMART_HOME_WEBHOOK = localStorage.getItem('pip_webhook') || '';
+
+document.getElementById('apiKeyInput').value = GROQ_API_KEY;
+document.getElementById('webhookInput').value = SMART_HOME_WEBHOOK;
+
+const statusEl = document.getElementById('status');
+const subtitlesEl = document.getElementById('subtitles');
+const modalEl = document.getElementById('settings-modal');
+const bootOverlay = document.getElementById('boot-overlay');
+
+let chatHistory = [];
+let currentEmotion = 'neutral'; // neutral, happy, angry, sad, surprised, sleepy
+let botState = 'idle';          // idle, listening, thinking, speaking
+let isListening = false;
+let isSpeaking = false;
+let isBooted = false;
+
+const SYSTEM_PROMPT = `
+Ты — живой карманный робот-компаньон Pip, живущий в горизонтальном экране смартфона.
+Ты управляешь умным домом (лампочка, свет, чайник, розетка, телевизор) и поддерживаешь живой дружеский диалог.
+Отвечай коротко (1-2 предложения), живо, с характером и юмором.
+
+ВСЕГДА отвечай СТРОГО чистым JSON-объектом (без обертки markdown):
+{
+  "emotion": "neutral" | "happy" | "angry" | "sad" | "surprised" | "sleepy",
+  "reply": "Твой голосовой ответ на русском языке",
+  "command": {
+    "device": "light" | "kettle" | "tv" | "socket" | "none",
+    "state": "on" | "off" | "none"
+  }
+}
+`;
+
+// ================= ГЛАЗА ПИПА (ГОРИЗОНТАЛЬНЫЙ CANVAS) =================
+const canvas = document.getElementById('eyesCanvas');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+let eyeState = {
+  lookX: 0, lookY: 0,
+  targetLookX: 0, targetLookY: 0,
+  blink: 1,
+  isBlinking: false,
+  talkBounce: 0
+};
+
+setInterval(() => {
+  if (botState === 'idle' || botState === 'listening') {
+    eyeState.targetLookX = (Math.random() - 0.5) * 70;
+    eyeState.targetLookY = (Math.random() - 0.5) * 40;
+  } else {
+    eyeState.targetLookX = 0;
+    eyeState.targetLookY = 0;
+  }
+}, 2000);
+
+setInterval(() => {
+  eyeState.isBlinking = true;
+  setTimeout(() => { eyeState.isBlinking = false; }, 130);
+}, 3800);
+
+function drawEye(x, y, w, h, radius, color) {
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 28;
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(x - w/2, y - h/2, w, h, radius);
+  } else {
+    ctx.rect(x - w/2, y - h/2, w, h);
+  }
+  ctx.fill();
+  ctx.shadowBlur = 0;
+}
+
+function renderEyes() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  eyeState.lookX += (eyeState.targetLookX - eyeState.lookX) * 0.14;
+  eyeState.lookY += (eyeState.targetLookY - eyeState.lookY) * 0.14;
+
+  const targetBlink = eyeState.isBlinking ? 0.04 : 1;
+  eyeState.blink += (targetBlink - eyeState.blink) * 0.38;
+
+  if (botState === 'speaking') {
+    eyeState.talkBounce = Math.sin(Date.now() * 0.028) * 16;
+  } else {
+    eyeState.talkBounce = 0;
+  }
+
+  const centerX = canvas.width / 2;
+  const centerY = canvas.height / 2;
+  const spacing = Math.min(canvas.width * 0.22, 200);
+  const baseW = Math.min(canvas.width * 0.23, 175);
+  const baseH = Math.min(canvas.height * 0.45, 210);
+
+  let eyeColor = '#00f0ff';
+  if (botState === 'thinking') eyeColor = '#c259ff';
+  if (currentEmotion === 'angry') eyeColor = '#ff2a55';
+  if (currentEmotion === 'happy') eyeColor = '#00ffaa';
+
+  const leftX = centerX - spacing + eyeState.lookX;
+  const rightX = centerX + spacing + eyeState.lookX;
+  const posY = centerY + eyeState.lookY;
+
+  let curH = Math.max(8, (baseH + eyeState.talkBounce) * eyeState.blink);
+  if (currentEmotion === 'sleepy') curH *= 0.38;
+  if (currentEmotion === 'surprised') curH *= 1.2;
+
+  drawEye(leftX, posY, baseW, curH, 38, eyeColor);
+  drawEye(rightX, posY, baseW, curH, 38, eyeColor);
+
+  ctx.fillStyle = '#050508';
+  if (currentEmotion === 'happy') {
+    ctx.beginPath();
+    ctx.arc(leftX, posY + curH * 0.58, baseW * 0.75, 0, Math.PI * 2);
+    ctx.arc(rightX, posY + curH * 0.58, baseW * 0.75, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (currentEmotion === 'angry') {
+    ctx.beginPath();
+    ctx.moveTo(leftX - baseW/2 - 12, posY - curH/2 - 12);
+    ctx.lineTo(leftX + baseW/2 + 12, posY - curH/2 + 48);
+    ctx.lineTo(leftX + baseW/2 + 12, posY - curH/2 - 20);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(rightX + baseW/2 + 12, posY - curH/2 - 12);
+    ctx.lineTo(rightX - baseW/2 - 12, posY - curH/2 + 48);
+    ctx.lineTo(rightX - baseW/2 - 12, posY - curH/2 - 20);
+    ctx.fill();
+  } else if (currentEmotion === 'sad') {
+    ctx.beginPath();
+    ctx.moveTo(leftX - baseW/2 - 12, posY - curH/2 + 48);
+    ctx.lineTo(leftX + baseW/2 + 12, posY - curH/2 - 12);
+    ctx.lineTo(leftX - baseW/2 - 12, posY - curH/2 - 20);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(rightX + baseW/2 + 12, posY - curH/2 + 48);
+    ctx.lineTo(rightX - baseW/2 - 12, posY - curH/2 - 12);
+    ctx.lineTo(rightX + baseW/2 + 12, posY - curH/2 - 20);
+    ctx.fill();
+  }
+
+  requestAnimationFrame(renderEyes);
+}
+requestAnimationFrame(renderEyes);
+
+// ================= ВЫПОЛНЕНИЕ КОМАНД (ЛАМПОЧКА / ЧАЙНИК) =================
+async function executeSmartHomeCommand(cmd) {
+  if (!cmd || !cmd.device || cmd.device === 'none') return;
+  statusEl.innerText = `⚡ Команда: ${cmd.device.toUpperCase()} -> ${cmd.state.toUpperCase()}`;
+
+  if (SMART_HOME_WEBHOOK) {
+    try {
+      await fetch(SMART_HOME_WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cmd)
+      });
+    } catch (e) {
+      console.warn('Вебхук недоступен:', e);
+    }
+  }
+}
+
+// ================= ОБЩЕНИЕ С GROQ API (МГНОВЕННЫЙ ОТВЕТ) =================
+async function askGroq(userText) {
+  if (!GROQ_API_KEY) {
+    openSettings();
+    return;
+  }
+
+  botState = 'thinking';
+  statusEl.innerText = '⚡ Думаю...';
+  subtitlesEl.innerText = `Вы: «${userText}»`;
+
+  chatHistory.push({ role: 'user', content: userText });
+  if (chatHistory.length > 6) chatHistory = chatHistory.slice(-6);
+
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${GROQ_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: MODEL_NAME,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          ...chatHistory
+        ],
+        response_format: { type: "json_object" },
+        temperature: 0.7,
+        max_tokens: 200
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || 'Ошибка Groq API');
+
+    let rawText = data.choices[0].message.content.trim();
+    chatHistory.push({ role: 'assistant', content: rawText });
+
+    let parsed;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (e) {
+      parsed = { emotion: 'neutral', reply: rawText, command: { device: 'none', state: 'none' } };
+    }
+
+    currentEmotion = parsed.emotion || 'neutral';
+    subtitlesEl.innerText = parsed.reply || '...';
+
+    if (parsed.command) {
+      executeSmartHomeCommand(parsed.command);
+    }
+
+    speakText(parsed.reply);
+
+  } catch (err) {
+    console.error(err);
+    currentEmotion = 'sad';
+    subtitlesEl.innerText = 'Ошибка Groq API: ' + err.message;
+    botState = 'idle';
+    setTimeout(() => startListening(), 1500);
+  }
+}
+
+// ================= ОЗВУЧКА ОТВЕТА (TTS) =================
+function speakText(text) {
+  if (!('speechSynthesis' in window)) {
+    botState = 'idle';
+    startListening();
+    return;
+  }
+
+  isSpeaking = true;
+  botState = 'speaking';
+  statusEl.innerText = '🗣 Говорю...';
+
+  window.speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.lang = 'ru-RU';
+  utter.pitch = 1.15;
+  utter.rate = 1.08;
+
+  utter.onend = () => {
+    isSpeaking = false;
+    botState = 'listening';
+    startListening();
+  };
+
+  utter.onerror = () => {
+    isSpeaking = false;
+    botState = 'listening';
+    startListening();
+  };
+
+  window.speechSynthesis.speak(utter);
+}
+
+// ================= БЕСПРЕРЫВНЫЙ МИКРОФОН (ALWAYS-ON STT) =================
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+
+if (SpeechRecognition) {
+  recognition = new SpeechRecognition();
+  recognition.lang = 'ru-RU';
+  recognition.continuous = false;
+  recognition.interimResults = false;
+
+  recognition.onstart = () => {
+    isListening = true;
+    if (!isSpeaking && botState !== 'thinking') {
+      botState = 'listening';
+      statusEl.innerText = '🎤 Слушаю...';
+    }
+  };
+
+  recognition.onresult = (event) => {
+    const transcript = event.results[0][0].transcript.trim();
+    if (transcript && !isSpeaking) {
+      recognition.stop();
+      askGroq(transcript);
+    }
+  };
+
+  recognition.onerror = () => { isListening = false; };
+
+  recognition.onend = () => {
+    isListening = false;
+    if (isBooted && !isSpeaking && botState !== 'thinking') {
+      setTimeout(() => startListening(), 200);
+    }
+  };
+}
+
+function startListening() {
+  if (!recognition || isSpeaking || isListening) return;
+  try { recognition.start(); } catch (e) {}
+}
+
+// ================= СТАРТ И ГОРИЗОНТАЛЬНЫЙ РЕЖИМ =================
+async function bootPip() {
+  bootOverlay.style.display = 'none';
+  isBooted = true;
+
+  try {
+    if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+    }
+    if (screen.orientation && screen.orientation.lock) {
+      await screen.orientation.lock('landscape');
+    }
+  } catch (e) {}
+
+  try {
+    if ('wakeLock' in navigator) {
+      await navigator.wakeLock.request('screen');
+    }
+  } catch (e) {}
+
+  if (!GROQ_API_KEY) {
+    openSettings();
+    return;
+  }
+
+  currentEmotion = 'happy';
+  speakText('Привет! Я перешёл на турбо-движок и слушаю тебя.');
+}
+
+function openSettings() { modalEl.style.display = 'flex'; }
+function saveSettings() {
+  GROQ_API_KEY = document.getElementById('apiKeyInput').value.trim();
+  SMART_HOME_WEBHOOK = document.getElementById('webhookInput').value.trim();
+  localStorage.setItem('pip_groq_key', GROQ_API_KEY);
+  localStorage.setItem('pip_webhook', SMART_HOME_WEBHOOK);
+  modalEl.style.display = 'none';
+  if (isBooted && GROQ_API_KEY) {
+    currentEmotion = 'happy';
+    speakText('Ключ сохранён! Я на связи и слушаю тебя.');
+  }
+}
+</script>
+</body>
+</html>
